@@ -1,0 +1,422 @@
+---
+title: "generate_UCH_metagenomics_plots"
+output: html_document
+date: "2026-03-05"
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(plyr)
+library(dplyr)
+library(data.table)
+library(cowplot)
+library("FactoMineR")
+library(pheatmap)
+library(vegan)
+library(readxl)
+library(tidyr)
+library(pathview)
+```
+
+
+A few of our samples did not sequence well and have very low trimmed read counts.  We will remove those below 7 million reads before further analyzing mapping results.
+
+```{r}
+#determine samples to keep
+read_counts <- read.csv("data/read_counts.csv",header=F)
+colnames(read_counts) <- c("sample","read_count")
+ggplot(read_counts,aes(x=read_count))+geom_histogram(bins=100)+geom_vline(xintercept=7e6,color="red")+ggtitle("Paired fastq.gz read count for 390 Maritime eDNA samples")+theme(plot.title=element_text(hjust=0.5))
+```
+
+The file minimap2_coverage_and_abundance.csv contains the number of reads mapped for each sample-bin pair using minimap2 to a dRep dereplicated set.  We have a set of samples associated with great lakes shipwrecks, but for this project we will focus on submerged aircrafts.  Below, total_reads_mapped_per_base is a measurement of depth normalized by the total bin length and bins are of the form assemblier:Sampletype_Testbed_Site_Depth_Remains_GroupFlag_XCoordinate_YCoordinate:binnumber.
+
+```{r}
+metadata <- read.csv("data/all_metadata.csv")
+abundance <- read.csv("data/minimap2_coverage_and_abundance.csv")
+abundance <- abundance[abundance$run %in% read_counts[read_counts$read_count>7e6,"sample"],]
+abundance <- abundance[!abundance$run %in% metadata[metadata$Testbed=="GreatLakes","SampleID"],]
+head(abundance)
+```
+
+We also have taxonomic classifications produced by the genome taxonomy database classifier that we will join with the mapping results.  
+
+```{r}
+gtdbtk <- read.csv("data/gtdbtk.tsv",sep="\t")
+gtdbtk <- gtdbtk[,c("user_genome","classification")]
+gtdbtk$domain <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,1],"d__","")
+gtdbtk$phylum <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,2],"p__","")
+gtdbtk$class <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,3],"c__","")
+gtdbtk$order <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,4],"o__","")
+gtdbtk$family <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,5],"f__","")
+gtdbtk$genus <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,6],"g__","")
+gtdbtk$species <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,7],"s__","")
+gtdbtk <- gtdbtk[,colnames(gtdbtk)!="classification"]
+head(gtdbtk)
+```
+
+
+```{r}
+abundance <- abundance[,c("run","bin","reads_mapped_per_base","coverage")]
+gtdbtk$bin <- gtdbtk$user_genome
+abundance <- join(abundance,gtdbtk,by="bin")
+```
+
+
+To calculate relative abundance, we calculate the total reads_mapped_per_base for each sample, then normalize mapping depths by this value.
+
+```{r}
+total_reads_mapped_per_base <- data.frame(abundance%>%group_by(run)%>%summarize(total_reads_mapped_per_base=sum(reads_mapped_per_base)))
+abundance <- join(abundance,total_reads_mapped_per_base,by="run")
+abundance$relative_abundance <- abundance$reads_mapped_per_base/abundance$total_reads_mapped_per_base
+total_abundance <- data.frame(abundance%>%group_by(run)%>%summarize(total_abundance=sum(relative_abundance)))
+abundance <- abundance[abundance$run %in% total_abundance[!is.na(total_abundance$total_abundance),"run"],]
+abundance$SampleID <- abundance$run
+abundance <- join(abundance,metadata,by="SampleID")
+ggplot(abundance,aes(y=relative_abundance,x=run,fill=domain))+geom_bar(stat="identity")+theme(axis.text.x=element_text(angle=90))+facet_grid(~Source+Testbed,scales="free")
+```
+
+Above we are just visualizing the relative proportions of bacteria and archaea in our samples.  We ultimately want to color relative abundances by phylum, but by default there are too many unique phyla to get a clear visualization, so we will group less common phyla into the group "Other".  We will also decide on standard colours to use for each phylum.
+
+```{r}
+abundance[grepl("Desulfobacterota",abundance$phylum),"phylum"] <- "Desulfobacterota"
+abundance[grepl("Myxococcota",abundance$phylum),"phylum"] <- "Myxococcota"
+
+
+phylum_abundances <- data.frame(abundance%>%group_by(phylum)%>%summarize(total_abundance=sum(relative_abundance)))
+phylum_abundances <- phylum_abundances[order(phylum_abundances$total_abundance,decreasing = TRUE),]
+abundance$temp_phylum <- abundance$phylum
+abundance[!abundance$temp_phylum %in% phylum_abundances[1:11,"phylum"],"temp_phylum"] <- "Other"
+
+
+abundance$temp_phylum <- factor(abundance$temp_phylum,levels=c("Other","Bacteroidota","Cyanobacteriota","Myxococcota","Chloroflexota","Planctomycetota","Desulfobacterota","Acidobacteriota","Actinomycetota","Pseudomonadota","Thermoplasmatota","Thermoproteota"))
+
+abundance$temp_testbed <- abundance$Testbed
+abundance[abundance$Site=="Hellcat","temp_testbed"] <- "Saipan-shallow (Hellcat)"
+abundance[abundance$Site=="Avenger","temp_testbed"] <- "Saipan-shallow (Avenger)"
+abundance[abundance$Source=="Water" & abundance$Testbed=="Saipan-shallow","temp_testbed"] <- "Saipan-shallow"
+
+phylum_colors <- c(Actinomycetota="dodgerblue2", Pseudomonadota="cornflowerblue",SAR324="royalblue4", Patescibacteria="khaki4",Cyanobacteriota="lightseagreen",Bacteroidota="turquoise",Nitrospirota="darkorange3",Planctomycetota="olivedrab",Other="gray",Gemmatimonadota="purple",`Thermoproteota`="gray20",Myxococcota="slateblue4",Methylomirabilota="brown",Thermoplasmatota="#2720b3",Chloroflexota="coral4","Acidobacteriota"="darkolivegreen",Desulfobacterota="seagreen4")
+```
+
+We can now make the first manuscript plot visualizing phylum relative abundances (unintuitively, figure 3).
+
+```{r}
+figure_3_ab <- plot_grid(ggplot(abundance[abundance$Source=="Water",],aes(y=relative_abundance,x=run,fill=temp_phylum))+geom_bar(stat="identity")+theme(axis.text.x=element_text(angle=90))+facet_grid(~temp_testbed,scales="free",space="free")+scale_fill_manual(values = phylum_colors)+theme_bw()+theme(axis.text.x=element_blank(),axis.ticks.x = element_blank())+xlab("")+ylab("Relative abundance")+guides(fill=guide_legend(title="Phylum"))+ theme(legend.position="none")+ggtitle("Water")+xlab("Sample")+ggtitle("A")+ theme(plot.title = element_text(face="bold", size = 15)),
+          ggplot(abundance[abundance$Source=="Sediment",],aes(y=relative_abundance,x=run,fill=temp_phylum))+geom_bar(stat="identity")+theme(axis.text.x=element_text(angle=90))+facet_grid(~temp_testbed,scales="free",space="free")+scale_fill_manual(values = phylum_colors)+theme_bw()+theme(axis.text.x=element_blank(),axis.ticks.x = element_blank())+xlab("")+ylab("")+xlab("Sample")+theme(axis.text.y=element_blank())+guides(fill=guide_legend(title="Phylum"))+ggtitle("B")+ theme(plot.title = element_text(face="bold", size = 15)),rel_widths=c(0.4,1))
+
+ggsave("plots/Figure_3_AB.png",width=10.5,height=4,figure_3_ab)
+
+
+figure_3_ab
+```
+
+We will first make a pca using the abundances of each unique phylum in each sample as input.
+
+```{r}
+abundance$key <- paste(abundance$run,abundance$phylum)
+phylum_abundances <- data.frame(abundance%>%group_by(key)%>%summarize(total_reads=sum(relative_abundance)))
+phylum_abundances$run <- str_split(phylum_abundances$key," ",simplify=TRUE)[,1]
+phylum_abundances$phylum <- str_split(phylum_abundances$key," ",simplify=TRUE)[,2]
+
+pca <- data.frame(reshape(phylum_abundances[,c("total_reads","run","phylum")], idvar = "run", timevar = "phylum", direction = "wide"))
+rownames(pca) <- pca$run
+pca <- pca[,colnames(pca)!="run"]
+colnames(pca) <- str_replace(colnames(pca),"relative_abundance.","")
+pca <- PCA(pca,scale.unit=TRUE,ncp=5,graph=TRUE)
+```
+
+Inspecting different metadata variables suggests that Testbed i.e. location and sample type are key determinants of clustering.
+
+```{r}
+pca_data <- data.frame(pca$ind$coord)
+pca_data$SampleID <- rownames(pca_data)
+pca_data <- join(pca_data,metadata,by="SampleID")
+
+testbed_colors=c(Italy="#88abe3",`Saipan-shallow`="#f5c178",`Saipan-deep`="#ab1c15")
+
+figure_2a <- ggplot(pca_data,aes(x=Dim.1,y=Dim.2,col=Testbed,shape=Source))+geom_point(size=2.5)+scale_shape_manual(values=c(16,1))+scale_color_manual(values=testbed_colors)+xlab(paste0("PC1 (",as.character(round(pca$eig[1,"percentage of variance"],2)),"%)"))+ylab(paste0("PC2 (",as.character(round(pca$eig[2,"percentage of variance"],2)),"%)"))+theme_minimal()
+
+figure_2a
+```
+
+
+Since we have the phylum abundances calculated, let's run some anosim comparisons using the R package vegan.
+```{r}
+phylum_abundances <- data.frame(reshape(phylum_abundances[,c("total_reads","run","phylum")], idvar = "run", timevar = "phylum", direction = "wide"))
+rownames(phylum_abundances) <- phylum_abundances$run
+phylum_abundances <- phylum_abundances[,colnames(phylum_abundances)!="run"]
+colnames(phylum_abundances) <- str_replace(colnames(phylum_abundances),"total_reads.","")
+com <- as.matrix(phylum_abundances)
+rownames(metadata) <- metadata$SampleID
+phylum_abundances <- cbind(phylum_abundances,metadata[rownames(phylum_abundances),])
+ano = anosim(com, phylum_abundances$Source, distance = "bray", permutations = 9999)
+ano
+```
+
+There is a very significant difference between water and sediment samples, as we would expect from intuition and the visualizations.
+
+```{r}
+mysimper <- simper(com,phylum_abundances$Source,permutations = 9999)
+mysimper
+```
+
+The separation by sample type is most strongly influenced by Desulfobacterota, followed by Cyanobacteriota and Pseudomonadota.  Note that the reported values are cumulative and we must subtract them to get individual phylum contributions.
+
+```{r}
+print(as.numeric(mysimper$Water_Sediment$cusum)[1])
+for (val in seq(2,5)){
+  print(as.numeric(mysimper$Water_Sediment$cusum)[val]-as.numeric(mysimper$Water_Sediment$cusum)[val-1])
+}
+```
+
+You might have noticed in the above barplots that the saipan-deep water samples looked very different from the other water samples.  Let's quantify that differences:
+
+```{r}
+water_phylum_abundances <- phylum_abundances[phylum_abundances$Source=="Water",]
+water_phylum_abundances$is_saipan_deep <- water_phylum_abundances$Testbed=="Saipan-deep"
+anosim(com[rownames(water_phylum_abundances),], water_phylum_abundances$is_saipan_deep, distance = "bray", permutations = 9999)
+```
+
+```{r}
+simper(com[rownames(water_phylum_abundances),], water_phylum_abundances$is_saipan_deep, permutations = 9999)
+```
+
+Let's see how the pca visualization changes when individual MAGs, not phyla, are used as input.
+
+```{r}
+pca <- data.frame(reshape(abundance[,c("relative_abundance","run","bin")], idvar = "run", timevar = "bin", direction = "wide"))
+rownames(pca) <- pca$run
+pca <- pca[,colnames(pca)!="run"]
+colnames(pca) <- str_replace(colnames(pca),"relative_abundance.","")
+pca <- PCA(pca,scale.unit=TRUE,ncp=5,graph=TRUE)
+
+pca_bin_contribs <- data.frame(pca$var$contrib)
+```
+
+```{r}
+pca_data <- data.frame(pca$ind$coord)
+pca_data$SampleID <- rownames(pca_data)
+pca_data <- join(pca_data,metadata,by="SampleID")
+
+figure_2b <- ggplot(pca_data,aes(x=Dim.1,y=Dim.2,col=Testbed,shape=Source))+geom_point(size=2.5)+scale_shape_manual(values=c(16,1))+scale_color_manual(values=testbed_colors)+xlab(paste0("PC1 (",as.character(round(pca$eig[1,"percentage of variance"],2)),"%)"))+ylab(paste0("PC2 (",as.character(round(pca$eig[2,"percentage of variance"],2)),"%)"))+theme_bw()
+
+figure_2 <- plot_grid(figure_2a+theme_bw()+theme(legend.position="none")+ggtitle("A")+ theme(plot.title = element_text(face="bold", size = 15),axis.text.x=element_text(size=10),axis.title.x=element_text(size=12),axis.text.y=element_text(size=10),axis.title.y=element_text(size=12)),figure_2b+ggtitle("B")+ theme(plot.title = element_text(face="bold", size = 15),axis.text.x=element_text(size=10),axis.title.x=element_text(size=12),axis.text.y=element_text(size=10),axis.title.y=element_text(size=12),legend.text=element_text(size=12),legend.title=element_text(size=12)),rel_widths=c(0.7,1))
+
+ggsave("plots/Figure_2.png",figure_2,width=10,height=5,bg="white")
+figure_2
+```
+
+Using individual MAGs as input results in substantial separation of Italy water bins across the second principal component. The two distinct blobs of Saipan-shallow sediment samples in figure B also correspond to the Hellcat and Avenger sites.
+
+```{r}
+
+mag_abundances <- data.frame(reshape(abundance[,c("relative_abundance","run","bin")], idvar = "run", timevar = "bin", direction = "wide"))
+rownames(mag_abundances) <- mag_abundances$run
+mag_abundances <- mag_abundances[,colnames(mag_abundances)!="run"]
+colnames(mag_abundances) <- str_replace(colnames(mag_abundances),"relative_abundance.","")
+com <- as.matrix(mag_abundances)
+rownames(metadata) <- metadata$SampleID
+mag_abundances <- cbind(mag_abundances,metadata[rownames(mag_abundances),])
+mag_abundances$is_odd <- mag_abundances$Source=="Water" & mag_abundances$Testbed=="Italy"
+mag_abundances[mag_abundances$is_odd,"is_odd"] <- "Italy_water"
+
+mag_abundances$is_Italy <- mag_abundances$Testbed=="Italy"
+anosim(com[rownames(mag_abundances[mag_abundances$Source=="Water",]),], mag_abundances[mag_abundances$Source=="Water","is_Italy"], distance = "bray", permutations = 9999)
+```
+
+```{r}
+for (col in colnames(phylum_abundances)){
+  if (col %in% gtdbtk$phylum){
+    phylum_abundances[,col] <- as.numeric(phylum_abundances[,col])
+  }
+}
+com <- as.matrix(phylum_abundances[,!colnames(phylum_abundances) %in% colnames(metadata) & colnames(phylum_abundances)!="is_Italy"])
+phylum_abundances$is_Italy <- phylum_abundances$Testbed=="Italy"
+anosim(com[rownames(phylum_abundances[phylum_abundances$Source=="Water",]),], phylum_abundances[phylum_abundances$Source=="Water","is_Italy"], distance = "bray", permutations = 9999)
+```
+
+The Italy water samples differ substantially from other water samples, but only when MAGs (not phyla) are used as input to ANOSIM.  Let's determine which specific MAGs are leading to this difference by leveraging the second principal component where the Italy samples are separated.
+
+```{r}
+figure_s2 <- ggplot(pca_bin_contribs,aes(x=Dim.2))+geom_histogram()+geom_vline(xintercept=1.1,linetype="dotted")+theme_bw()+xlab("PC2 contribution")+ylab("Bin count") +annotate("text", x = 1.45, y = 120, label = "45 MAGs with PC2 contribution>1.1")
+ggsave("plots/figure_s2.png",figure_s2,height=5,width=8)
+figure_s2
+```
+
+The top peak of PC2 contributions contains 45 bins:
+
+```{r}
+odd_bins <- str_replace(str_replace(rownames(pca_bin_contribs[pca_bin_contribs$Dim.2>1.1,]),fixed("."),":"),".bin",":bin") 
+length(odd_bins)
+odd_bins
+```
+
+We can produce a quick visualization of these bins' relative abundance to add to figure 3:
+
+```{r}
+figure_3_cd <- plot_grid(ggplot(abundance[abundance$Source=="Water" & abundance$bin %in% odd_bins,],aes(y=relative_abundance,x=run,fill=temp_phylum))+theme_bw()+ylim(0,1)+geom_bar(stat="identity")+theme(axis.text.x=element_text(angle=90))+facet_grid(~temp_testbed,scales="free",space="free")+scale_fill_manual(values = phylum_colors)+theme(axis.text.x=element_blank(),axis.ticks.x = element_blank())+xlab("")+ylab("Relative abundance")+guides(fill=guide_legend(title="Phylum"))+ theme(legend.position="none")+ggtitle("Water")+xlab("Sample")+ggtitle("A")+ theme(plot.title = element_text(face="bold", size = 15)),
+          ggplot(abundance[abundance$Source=="Sediment" &  abundance$bin %in% odd_bins,],aes(y=relative_abundance,x=run,fill=temp_phylum))+geom_bar(stat="identity")+theme_bw()+theme(axis.text.x=element_text(angle=90))+facet_grid(~temp_testbed,scales="free",space="free")+ylim(0,1)+scale_fill_manual(values = phylum_colors)+theme(axis.text.x=element_blank(),axis.ticks.x = element_blank())+xlab("")+ylab("")+xlab("Sample")+theme(axis.text.y=element_blank())+guides(fill=guide_legend(title="Phylum"))+ggtitle("B")+ theme(plot.title = element_text(face="bold", size = 15)),rel_widths=c(0.4,1))
+ggsave("plots/Figure_3_CD.png",width=10.5,height=4,figure_3_cd)
+figure_3_cd
+```
+
+We can use simple fisher tests to compare the eggnog coding potential of these MAGs to the rest of the dataset.  This requires a bit of manipulation to get the eggnog kegg annotations into a suitable format for enrichment analysis.
+
+```{r}
+#Using an excel converted version of the file because R sometimes has trouble reading in very long tsvs
+eggnog <- read_xlsx("data/emapper.annotations.xlsx")
+eggnog$bin <- paste(str_split(eggnog$query,"_",simplify=TRUE)[,1],str_split(eggnog$query,"_",simplify=TRUE)[,2],str_split(eggnog$query,"_",simplify=TRUE)[,3],str_split(eggnog$query,"_",simplify=TRUE)[,4],str_split(eggnog$query,"_",simplify=TRUE)[,5],str_split(eggnog$query,"_",simplify=TRUE)[,6],str_split(eggnog$query,"_",simplify=TRUE)[,7],str_split(eggnog$query,"_",simplify=TRUE)[,8],sep="_")
+eggnog <- data.frame(eggnog)
+
+#get a matrix of how often each kegg id occurs in each MAG
+kegg <- eggnog[,c("query","KEGG_ko")]
+kegg <- kegg[kegg$KEGG_ko!="-",]
+kegg <- kegg[!is.na(kegg$KEGG_ko),]
+kegg <- kegg[kegg$KEGG_ko!="",]
+kegg <- data.table(kegg)
+kegg <- kegg[, list(kegg_hit = unlist(strsplit(KEGG_ko , ","))),by=query]
+kegg <- data.frame(kegg)
+kegg$group <- paste(str_split(kegg$query,":",simplify=TRUE)[,1],str_split(kegg$query,":",simplify=TRUE)[,2],sep=".")
+kegg$bin <- str_split(str_split(kegg$query,":",simplify=TRUE)[,3],"_",simplify=TRUE)[,1]
+kegg$bin <- paste(kegg$group,kegg$bin,sep=".")
+kegg <- distinct(kegg[,c("bin","kegg_hit")])
+colnames(kegg) <- c("fasta","kegg_hit")
+kegg$key <- paste(kegg$fasta,kegg$kegg_hit,sep=";")
+kegg_counts <- data.frame(table(kegg$key))
+kegg_counts$bin <- str_split(kegg_counts$Var1,";",simplify=TRUE)[,1]
+kegg_counts$kegg <- str_split(kegg_counts$Var1,";",simplify=TRUE)[,2]
+temp <- data.frame(table(kegg_counts$kegg))
+kegg_counts <- kegg_counts[kegg_counts$kegg %in% temp[temp$Freq>5,"Var1"],]
+kegg_counts <- data.frame(reshape(kegg_counts[,c("bin","kegg","Freq")],idvar = "bin", timevar = "kegg", direction = "wide"))
+rownames(kegg_counts) <- kegg_counts$bin
+kegg_counts <- kegg_counts[,colnames(kegg_counts)!="bin"]
+colnames(kegg_counts) <- str_replace_all(colnames(kegg_counts),"Freq.","")
+kegg_counts[is.na(kegg_counts)] <- 0
+
+kegg_counts <- data.frame(t(kegg_counts))
+```
+
+
+```{r}
+#get matrix of how often each kegg id occurs in each clade (Italy or other)
+clades <- list()
+clades[["Italy_75"]] <- str_replace_all(odd_bins,":",".")
+clades[["outgroup"]] <- colnames(kegg_counts)[!colnames(kegg_counts) %in% clades[["Italy_75"]]]
+
+
+all_counts <- list()
+for (clade in names(clades)){
+  
+  clade_counts <- kegg_counts[,clades[[clade]]]
+  clade_counts$sum <- apply(clade_counts,1,sum)
+  clade_counts$bins_with_kegg <- ncol(clade_counts)-1-clade_counts$sum
+  all_counts[[clade]] <- clade_counts[,c("sum","bins_with_kegg")]
+  all_counts[[clade]]$kegg <- rownames(clade_counts)
+  
+}
+all_counts <- ldply(all_counts)
+colnames(all_counts) <- c("bin_group","bins_with_kegg","bins_without_kegg","kegg")
+
+```
+
+
+Now we can run fisher tests.
+```{r}
+all_fisher_results <- list()
+
+get_fold_change <- function(x){ 
+  x <- as.numeric(x)
+  return(x[1]/(x[1]+x[2])/(x[3]/(x[3]+x[4])))
+ 
+}
+
+for (clade in names(clades)){
+
+  within_clade_counts <- all_counts[all_counts$bin_group==clade,]
+  outside_clade_counts <- all_counts[all_counts$bin_group!=clade,]
+
+  rownames(outside_clade_counts) <- outside_clade_counts$kegg
+  rownames(within_clade_counts) <- within_clade_counts$kegg
+  outside_clade_counts <- outside_clade_counts[rownames(within_clade_counts),]
+  clade_counts <- cbind(within_clade_counts[,c("bins_with_kegg","bins_without_kegg")],outside_clade_counts[,c("bins_with_kegg","bins_without_kegg")])
+  colnames(clade_counts) <- c("ingroup_with_kegg","ingroup_without_kegg","outgroup_with_kegg","outgroup_without_kegg")
+p_values <- apply(clade_counts,1, function(x) fisher.test(matrix(x,nr=2))$p.value)
+fold_changes <- log2(apply(clade_counts,1,get_fold_change))
+#fisher_results <- fisher_results[[clade]]
+fisher_results <- clade_counts
+fisher_results$fold_change <- fold_changes
+fisher_results$p_value <- p_values
+#fisher_results <- data.frame(rownames(within_clade_counts),fold_changes,p_values)
+#colnames(fisher_results) <- c("orthogroup","fold_change","p_value")
+fisher_results[is.nan(fisher_results$fold_change),"fold_change"] <- 0
+fisher_results[is.infinite(fisher_results$fold_change) & fisher_results$fold_change < 0,"fold_change"] <- min(fisher_results[!is.infinite(fisher_results$fold_change),"fold_change"],na.rm = TRUE)
+fisher_results[is.infinite(fisher_results$fold_change) & fisher_results$fold_change > 0,"fold_change"] <- max(fisher_results[!is.infinite(fisher_results$fold_change),"fold_change"],na.rm = TRUE)
+fisher_results$p_adjust <- p.adjust(fisher_results$p_value, method = 'hochberg', n = nrow(fisher_results))
+ fisher_results <- fisher_results[order(fisher_results$p_value),]
+ fisher_results$kegg <- rownames(fisher_results)
+all_fisher_results[[clade]] <- fisher_results
+print(clade)
+  
+  }
+```
+
+```{r}
+all_fisher_results <- ldply(all_fisher_results)
+all_fisher_results <- all_fisher_results[all_fisher_results$.id=="Italy_75",]
+all_fisher_results <- all_fisher_results[all_fisher_results$p_adjust<=0.05,]
+all_fisher_results <- all_fisher_results[order(all_fisher_results$fold_change),]
+```
+
+
+```{r}
+head(all_fisher_results)
+```
+```{r}
+kegg_names <- read.table("data/ko00001.keg",fill=TRUE)
+kegg_names <- kegg_names[kegg_names$V1 %in% c("A","B","C","D"),]
+kegg_names$name <- paste(kegg_names$V3,kegg_names$V4,kegg_names$V5,kegg_names$V6)
+kegg_names$kegg <- kegg_names$V2
+kegg_names <- kegg_names[,c("kegg","name")]
+all_fisher_results$kegg <- str_replace(all_fisher_results$kegg,"ko.","")
+all_fisher_results <- plyr::join(all_fisher_results,kegg_names,by="kegg")
+
+all_fisher_results <- distinct(all_fisher_results)
+all_fisher_results <- all_fisher_results[order(all_fisher_results$p_value),]
+write.csv(all_fisher_results,"data/italy_fisher_results.csv")
+```
+
+
+Let's move on to alkane metabolism occurring in sediment sites.
+
+```{r}
+figure_4a <- ggplot(abundance[abundance$Source=="Sediment" & abundance$bin %in% eggnog[grepl("Alkane 1-monooxygenase",eggnog$Description),"bin"],],aes(y=relative_abundance,x=run,fill=temp_phylum))+
+  geom_bar(stat="identity")+theme(axis.text.x=element_text(angle=90))+facet_grid(~temp_testbed,scales="free",space="free")+
+  theme_bw()+scale_fill_manual(values = phylum_colors)+theme(axis.text.x=element_blank(),axis.ticks.x = element_blank())+xlab("")+ylab("")+ggtitle("A")+ theme(plot.title = element_text(face="bold", size = 15))+guides(fill=guide_legend(title="Phylum"))
+ggsave("plots/Figure_4a.png",figure_4a+ylab("Relative abundance"),height=3,width=8,dpi=500)
+figure_4a
+```
+
+For visualizing the full alkane degradation pathway, I am reading in a list of relevant kos that we will visualize for desulfobacterota at the hellcat site using pathview.
+```{r}
+to_join <- data.frame(eggnog[,c("bin","KEGG_ko")]%>%separate_longer_delim(delim=",",cols="KEGG_ko"))
+
+target_kos <- read.csv("data/fatty_acid_kos.txt.txt",header=F)
+
+grouped_hellcat_abundances <- join(abundance[abundance$Site=="Hellcat" & abundance$Source=="Sediment" & abundance$phylum=="Desulfobacterota",],to_join[to_join$KEGG_ko %in% target_kos$V1,c("bin","KEGG_ko")],by="bin")
+grouped_hellcat_abundances <- distinct(grouped_hellcat_abundances[,c("run","bin","KEGG_ko","relative_abundance")])
+grouped_hellcat_abundances <- data.frame(grouped_hellcat_abundances%>%group_by(KEGG_ko)%>%summarize(total_abundance=sum(relative_abundance)))
+grouped_hellcat_abundances$total_abundance <- grouped_hellcat_abundances$total_abundance/nrow(metadata[metadata$Site=="Hellcat" & metadata$Source=="Sediment",])#normalize total abundances by total number of hellcat sediment runs to get average abundance of bins containing each ko
+grouped_hellcat_abundances <- grouped_hellcat_abundances[!is.na(grouped_hellcat_abundances$KEGG_ko),]
+temp <- str_replace(grouped_hellcat_abundances$KEGG_ko,"ko:","")
+grouped_hellcat_abundances <- grouped_hellcat_abundances$total_abundance
+names(grouped_hellcat_abundances) <- temp
+
+
+pv.out <- pathview(grouped_hellcat_abundances, pathway.id = "ko00071",species="ko",low="black",mid="white",high="seagreen4",limit=list(gene=0.30, cpd=0.30))
+```
+The file ko00071.pathview.png was used to produce figure 4c.
+
+
+
+
