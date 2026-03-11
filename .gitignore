@@ -1,3 +1,4 @@
 .R*
 generate_UCH_metagenomics_plots_files*
 *.Rproj
+data/emapper.annotations.xlsx

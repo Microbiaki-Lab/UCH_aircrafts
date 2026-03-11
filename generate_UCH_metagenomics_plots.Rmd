@@ -4,7 +4,7 @@ output: html_document
 date: "2026-03-05"
 ---
 
-```{r setup, include=FALSE}
+```{r setup}
 library(ggplot2)
 library(stringr)
 library(plyr)
@@ -20,7 +20,7 @@ library(pathview)
 ```
 
 
-A few of our samples did not sequence well and have very low trimmed read counts.  We will remove those below 7 million reads before further analyzing mapping results.
+We have 390 metagenome samples collected from underwater cultural heritage sites including plane wrecks and shipwrecks. A few of our samples did not sequence well and have very low trimmed read counts. We will remove those below 7 million reads before further analyzing mapping results.
 
 ```{r}
 #determine samples to keep
@@ -29,7 +29,7 @@ colnames(read_counts) <- c("sample","read_count")
 ggplot(read_counts,aes(x=read_count))+geom_histogram(bins=100)+geom_vline(xintercept=7e6,color="red")+ggtitle("Paired fastq.gz read count for 390 Maritime eDNA samples")+theme(plot.title=element_text(hjust=0.5))
 ```
 
-The file minimap2_coverage_and_abundance.csv contains the number of reads mapped for each sample-bin pair using minimap2 to a dRep dereplicated set.  We have a set of samples associated with great lakes shipwrecks, but for this project we will focus on submerged aircrafts.  Below, total_reads_mapped_per_base is a measurement of depth normalized by the total bin length and bins are of the form assemblier:Sampletype_Testbed_Site_Depth_Remains_GroupFlag_XCoordinate_YCoordinate:binnumber.
+The file minimap2_coverage_and_abundance.csv contains the number of reads mapped for each sample-bin pair using minimap2 to a dRep dereplicated set.  We have a set of samples associated with great lakes shipwrecks, but for this project we will focus on submerged aircrafts.  Below, total_reads_mapped_per_base is a measurement of depth normalized by the total bin length and bins are of the form Testbed.Site.Source.binnumber.
 
 ```{r}
 metadata <- read.csv("data/all_metadata.csv")
@@ -43,7 +43,7 @@ We also have taxonomic classifications produced by the genome taxonomy database 
 
 ```{r}
 gtdbtk <- read.csv("data/gtdbtk.tsv",sep="\t")
-gtdbtk <- gtdbtk[,c("user_genome","classification")]
+gtdbtk <- gtdbtk[,c("bin","classification")]
 gtdbtk$domain <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,1],"d__","")
 gtdbtk$phylum <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,2],"p__","")
 gtdbtk$class <- str_replace(str_split(gtdbtk$classification,";",simplify=TRUE)[,3],"c__","")
@@ -58,7 +58,6 @@ head(gtdbtk)
 
 ```{r}
 abundance <- abundance[,c("run","bin","reads_mapped_per_base","coverage")]
-gtdbtk$bin <- gtdbtk$user_genome
 abundance <- join(abundance,gtdbtk,by="bin")
 ```
 
@@ -170,7 +169,7 @@ for (val in seq(2,5)){
 }
 ```
 
-You might have noticed in the above barplots that the saipan-deep water samples looked very different from the other water samples.  Let's quantify that differences:
+You might have noticed in the above barplots that the saipan-deep water samples looked very different from the other water samples.  Let's quantify that difference:
 
 ```{r}
 water_phylum_abundances <- phylum_abundances[phylum_abundances$Source=="Water",]
@@ -207,7 +206,7 @@ ggsave("plots/Figure_2.png",figure_2,width=10,height=5,bg="white")
 figure_2
 ```
 
-Using individual MAGs as input results in substantial separation of Italy water bins across the second principal component. The two distinct blobs of Saipan-shallow sediment samples in figure B also correspond to the Hellcat and Avenger sites.
+Using individual MAGs as input results in substantial separation of Italy water bins across the second principal component. The two distinct blobs of Saipan-shallow sediment samples in figure B also correspond to the Hellcat and Avenger sites.  We can describe the significance of the Italy from other water samples using ANOSIM:
 
 ```{r}
 
@@ -225,6 +224,8 @@ mag_abundances$is_Italy <- mag_abundances$Testbed=="Italy"
 anosim(com[rownames(mag_abundances[mag_abundances$Source=="Water",]),], mag_abundances[mag_abundances$Source=="Water","is_Italy"], distance = "bray", permutations = 9999)
 ```
 
+There is a significant difference between Italy and other water samples. However, this significance disappears if the phylum abundances, rather than MAG abundances, are used as input:
+
 ```{r}
 for (col in colnames(phylum_abundances)){
   if (col %in% gtdbtk$phylum){
@@ -236,18 +237,18 @@ phylum_abundances$is_Italy <- phylum_abundances$Testbed=="Italy"
 anosim(com[rownames(phylum_abundances[phylum_abundances$Source=="Water",]),], phylum_abundances[phylum_abundances$Source=="Water","is_Italy"], distance = "bray", permutations = 9999)
 ```
 
-The Italy water samples differ substantially from other water samples, but only when MAGs (not phyla) are used as input to ANOSIM.  Let's determine which specific MAGs are leading to this difference by leveraging the second principal component where the Italy samples are separated.
+Let's determine which specific MAGs are leading to this difference by leveraging the second principal component where the Italy samples are separated.
 
 ```{r}
 figure_s2 <- ggplot(pca_bin_contribs,aes(x=Dim.2))+geom_histogram()+geom_vline(xintercept=1.1,linetype="dotted")+theme_bw()+xlab("PC2 contribution")+ylab("Bin count") +annotate("text", x = 1.45, y = 120, label = "45 MAGs with PC2 contribution>1.1")
-ggsave("plots/figure_s2.png",figure_s2,height=5,width=8)
+ggsave("plots/Figure_s2.png",figure_s2,height=5,width=8)
 figure_s2
 ```
 
 The top peak of PC2 contributions contains 45 bins:
 
 ```{r}
-odd_bins <- str_replace(str_replace(rownames(pca_bin_contribs[pca_bin_contribs$Dim.2>1.1,]),fixed("."),":"),".bin",":bin") 
+odd_bins <- rownames(pca_bin_contribs[pca_bin_contribs$Dim.2>1.1,])
 length(odd_bins)
 odd_bins
 ```
@@ -266,9 +267,8 @@ We can use simple fisher tests to compare the eggnog coding potential of these M
 ```{r}
 #Using an excel converted version of the file because R sometimes has trouble reading in very long tsvs
 eggnog <- read_xlsx("data/emapper.annotations.xlsx")
-eggnog$bin <- paste(str_split(eggnog$query,"_",simplify=TRUE)[,1],str_split(eggnog$query,"_",simplify=TRUE)[,2],str_split(eggnog$query,"_",simplify=TRUE)[,3],str_split(eggnog$query,"_",simplify=TRUE)[,4],str_split(eggnog$query,"_",simplify=TRUE)[,5],str_split(eggnog$query,"_",simplify=TRUE)[,6],str_split(eggnog$query,"_",simplify=TRUE)[,7],str_split(eggnog$query,"_",simplify=TRUE)[,8],sep="_")
 eggnog <- data.frame(eggnog)
-
+eggnog$bin <- str_split(eggnog$query,"_",simplify=TRUE)[,1]
 #get a matrix of how often each kegg id occurs in each MAG
 kegg <- eggnog[,c("query","KEGG_ko")]
 kegg <- kegg[kegg$KEGG_ko!="-",]
@@ -277,9 +277,9 @@ kegg <- kegg[kegg$KEGG_ko!="",]
 kegg <- data.table(kegg)
 kegg <- kegg[, list(kegg_hit = unlist(strsplit(KEGG_ko , ","))),by=query]
 kegg <- data.frame(kegg)
-kegg$group <- paste(str_split(kegg$query,":",simplify=TRUE)[,1],str_split(kegg$query,":",simplify=TRUE)[,2],sep=".")
-kegg$bin <- str_split(str_split(kegg$query,":",simplify=TRUE)[,3],"_",simplify=TRUE)[,1]
-kegg$bin <- paste(kegg$group,kegg$bin,sep=".")
+
+kegg$group <- paste(str_split(kegg$query,fixed("."),simplify=TRUE)[,1],str_split(kegg$query,fixed("."),simplify=TRUE)[,2],str_split(kegg$query,fixed("."),simplify=TRUE)[,3],sep=".")
+kegg$bin <- str_split(kegg$query,"_",simplify=TRUE)[,1]
 kegg <- distinct(kegg[,c("bin","kegg_hit")])
 colnames(kegg) <- c("fasta","kegg_hit")
 kegg$key <- paste(kegg$fasta,kegg$kegg_hit,sep=";")
@@ -301,7 +301,7 @@ kegg_counts <- data.frame(t(kegg_counts))
 ```{r}
 #get matrix of how often each kegg id occurs in each clade (Italy or other)
 clades <- list()
-clades[["Italy_75"]] <- str_replace_all(odd_bins,":",".")
+clades[["Italy_75"]] <- odd_bins
 clades[["outgroup"]] <- colnames(kegg_counts)[!colnames(kegg_counts) %in% clades[["Italy_75"]]]
 
 
@@ -370,9 +370,6 @@ all_fisher_results <- all_fisher_results[order(all_fisher_results$fold_change),]
 
 
 ```{r}
-head(all_fisher_results)
-```
-```{r}
 kegg_names <- read.table("data/ko00001.keg",fill=TRUE)
 kegg_names <- kegg_names[kegg_names$V1 %in% c("A","B","C","D"),]
 kegg_names$name <- paste(kegg_names$V3,kegg_names$V4,kegg_names$V5,kegg_names$V6)
@@ -387,7 +384,7 @@ write.csv(all_fisher_results,"data/italy_fisher_results.csv")
 ```
 
 
-Let's move on to alkane metabolism occurring in sediment sites.
+Let's move on to alkane metabolism occurring in sediment sites.  We will first visualize the abundance of bins encoding alkane 1-monooxygenase, a key enzyme in converting alkanes into a metabolizable form.
 
 ```{r}
 figure_4a <- ggplot(abundance[abundance$Source=="Sediment" & abundance$bin %in% eggnog[grepl("Alkane 1-monooxygenase",eggnog$Description),"bin"],],aes(y=relative_abundance,x=run,fill=temp_phylum))+
@@ -397,7 +394,8 @@ ggsave("plots/Figure_4a.png",figure_4a+ylab("Relative abundance"),height=3,width
 figure_4a
 ```
 
-For visualizing the full alkane degradation pathway, I am reading in a list of relevant kos that we will visualize for desulfobacterota at the hellcat site using pathview.
+Desulfobacterota bins encoding this enzyme appear quite abundant at the Hellcat site. For visualizing the full alkane degradation pathway, I am reading in a list of relevant kos that we will visualize for desulfobacterota at the hellcat site using pathview.
+
 ```{r}
 to_join <- data.frame(eggnog[,c("bin","KEGG_ko")]%>%separate_longer_delim(delim=",",cols="KEGG_ko"))
 
